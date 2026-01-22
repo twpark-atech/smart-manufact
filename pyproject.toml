@@ -8,6 +8,7 @@ dependencies = [
     "beautifulsoup4>=4.14.3",
     "httpx>=0.28.1",
     "minio>=7.2.20",
+    "neo4j>=6.1.0",
     "numpy>=2.4.1",
     "opensearch-py>=3.1.0",
     "pillow>=12.1.0",

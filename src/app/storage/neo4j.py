@@ -5,6 +5,8 @@
 # AI 활용 여부 :
 # ==============================================================================
 
+from __future__ import annotations
+
 import logging
 from dataclasses import dataclass
 from typing import Dict, List, Any
@@ -23,10 +25,12 @@ class Neo4jConfig:
         uri: Neo4j 접속 URI.
         username: 사용자명.
         password: 비밀번호.
+        database: 사용할 DB 이름.
     """
     uri: str
     username: str
     password: str
+    database: str
 
 
 class Neo4jWriter:
@@ -71,11 +75,12 @@ class Neo4jWriter:
         stmts = [
             "CREATE CONSTRAINT doc_id_unique IF NOT EXISTS FOR (d:Document) REQUIRE d.doc_id IS UNIQUE",
             "CREATE CONSTRAINT chunk_id_unique IF NOT EXISTS FOR (c:Chunk) REQUIRE c.chunk_id IS UNIQUE",
+            "CREATE INDEX chunk_doc_id_idx IF NOT EXISTS FOR (c:Chunk) ON (c.doc_id)",
         ]
-        with self._driver.session() as session:
+        with self._driver.session(database=self._cfg.database) as session:
             for s in stmts:
                 try:
-                    session.run(s)
+                    session.run(s).consume()
                 except Exception as e:
                     _log.info("Constraint creation skipped/failed: %s", e)
 
@@ -83,6 +88,8 @@ class Neo4jWriter:
         self,
         doc: Dict[str, Any],
         chunks: List[Dict[str, Any]],
+        *,
+        rebuild_next: bool = True,
     ) -> None:
         """Document 및 Chunk를 업서트하고 HAS_CHUNK/NEXT 관계를 생성합니다.
         
@@ -96,6 +103,7 @@ class Neo4jWriter:
             - 최소 키: doc_id, title, source_uri, sha256
             chunks: 청크 메타 dict 리스트.
             - 최소 키: chunk_id, doc_id, page_start, page_end, order
+            rebuild_next: True면 해당 doc_id의 기존 NEXT 관계를 삭제 후 재생성합니다.
 
         Returns:
             None
@@ -104,6 +112,48 @@ class Neo4jWriter:
             KeyError: chunks 정렬 시 "order" 또는 관계 생성 시 "chunk_id" 등이 누락된 경우.
             neo4j.exception.Neo4jError: Cypher 실행에 실패한 경우.
         """
+        if not chunks:
+            with self._driver.session(database=self._cfg.database) as session:
+                session.execute_write(self._tx_upsert_document_only, doc)
+            return
+        
+        with self._driver.session(database=self._cfg.database) as session:
+            session.execute_write(self._tx_upsert_document_and_chunks, doc, chunks)
+
+            if rebuild_next:
+                session.execute_write(self._tx_delete_next_for_doc, doc["doc_id"])
+
+            ordered = sorted(
+                chunks,
+                key=lambda x: (int(x.get("page_start", 0)), int(x.get("order", 0))),
+            )
+            pairs = [
+                {"a": ordered[i]["chunk_id"], "b": ordered[i + 1]["chunk_id"]}
+                for i in range(len(ordered) - 1)
+                if ordered[i].get("chunk_id") and ordered[i + 1].get("chunk_id")
+            ]
+            if pairs:
+                session.execute_write(self._tx_upsert_next_pairs, pairs)
+
+    @staticmethod
+    def _tx_upsert_document_only(tx, doc: Dict[str, Any]) -> None:
+        cypher = """
+        MERGE (d:Document {doc_id: $doc.doc_id})
+        SET d.title = $doc.title,
+            d.source_uri = $doc.source_uri,
+            d.sha256 = $doc.sha256,
+            d.updated_at = datetime()
+        """
+        tx.run(
+            cypher,
+            doc_id=doc.get("doc_id"),
+            title=doc.get("title"),
+            source_uri=doc.get("source_uri"),
+            sha256=doc.get("sha256"),
+        ).consume()
+
+    @staticmethod
+    def _tx_upsert_document_and_chunks(tx, doc: Dict[str, Any], chunks: List[Dict[str, Any]]) -> None:
         cypher = """
         MERGE (d:Document {doc_id: $doc.doc_id})
         SET d.title = $doc.title,
@@ -120,7 +170,18 @@ class Neo4jWriter:
         MERGE (d)-[:HAS_CHUNK]->(c)
         RETURN count(*) AS n
         """
+        tx.run(cypher, doc=doc, chunks=chunks).consume()
 
+    @staticmethod
+    def _tx_delete_next_for_doc(tx, doc_id: str) -> None:
+        cypher = """
+        MATCH (:Document {doc_id:$doc_id})-[:HAS_CHUNK]->(c:Chunk)-[r:NEXT]->(:Chunk)
+        DELETE r
+        """
+        tx.run(cypher, doc_id=doc_id).consume()
+
+    @staticmethod
+    def _tx_upsert_next_pairs(tx, pairs: List[Dict[str, Any]]) -> None:
         cypher_next = """
         UNWIND $pairs AS p
         MATCH (a:Chunk {chunk_id: p.a})
@@ -128,11 +189,4 @@ class Neo4jWriter:
         MERGE (a)-[:NEXT]->(b)
         RETURN count(*) AS n
         """
-
-        with self._driver.session() as session:
-            session.run(cypher, doc=doc, chunks=chunks)
-
-            ordered = sorted(chunks, key=lambda x: x["order"])
-            pairs = [{"a": ordered[i]["chunk_id"], "b": ordered[i + 1]["chunk_id"]} for i in range(len(ordered) - 1)]
-            if pairs:
-                session.run(cypher_next, pairs=pairs)
+        tx.run(cypher_next, pairs=pairs).consume()

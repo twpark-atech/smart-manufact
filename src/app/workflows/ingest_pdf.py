@@ -28,6 +28,7 @@ from app.parsing.ocr import ocr_page
 from app.parsing.pdf import coerce_page_no_and_payload, materialize_png_payload
 
 from app.storage.minio import MinIOConfig, MinIOWriter, MinIOReader
+from app.storage.neo4j import Neo4jConfig, Neo4jWriter
 from app.storage.opensearch import OpenSearchConfig, OpenSearchWriter
 from app.storage.embedding import OllamaEmbeddingConfig, OllamaEmbeddingProvider
 from app.storage.postgres import PostgresConfig, PostgresWriter
@@ -637,6 +638,20 @@ def ingest_pdf(
         pg.ensure_schema()
         pg_cur = pg.cursor()
 
+    neo4j_enabled = bool(get_value(cfg, "neo4j.enabled", False))
+    neo4j_writer: Optional[Neo4jWriter] = None
+    if neo4j_enabled:
+        neo4j_cfg = Neo4jConfig(
+            uri=str(get_value(cfg, "neo4j.uri", "")),
+            username=str(get_value(cfg, "neo4j.username", "")),
+            password=str(get_value(cfg, "neo4j.password", "")),
+            database=str(get_value(cfg, "neo4j.database", "neo4j")),
+        )
+        if not neo4j_cfg.uri or not neo4j_cfg.username:
+            raise ValueError("neo4j.enabled=true requires neo4j.uri/neo4j.username(/password)")
+        neo4j_writer = Neo4jWriter(neo4j_cfg)
+        neo4j_writer.ensure_constraints()
+
     page_texts: List[str] = []
     page_count = 0
 
@@ -917,6 +932,28 @@ def ingest_pdf(
         )
         chunk_count = len(chunks)
 
+        if neo4j_writer is not None:
+            try:
+                doc_meta = {
+                    "doc_id": doc_id,
+                    "title": doc_title or doc_id,
+                    "source_uri": source_uri,
+                    "sha256": doc_sha,
+                }
+                chunk_meta = [
+                    {
+                        "chunk_id": c["chunk_id"],
+                        "doc_id": c["doc_id"],
+                        "page_start": int(c.get("page_start", 0)),
+                        "page_end": int(c.get("page_end", 0)),
+                        "order": int(c.get("order", 0)),
+                    }
+                    for c in chunks
+                ]
+                neo4j_writer.upsert_document_and_chunks(doc_meta, chunk_meta, rebuild_next=True)
+            except Exception as e:
+                _log.warning("Neo4j upsert skipped/failed. doc_id=%s err=%s", doc_id, e)
+
         indexed_chunk_count = 0
         if chunks:
             texts = [c["text"] for c in chunks]
@@ -1067,6 +1104,12 @@ def ingest_pdf(
             mode=run_mode,
         )
     finally:
+        if neo4j_writer is not None:
+            try:
+                neo4j_writer.close()
+            except Exception:
+                pass
+
         if pg_cur is not None:
             try:
                 pg_cur.close()
@@ -1200,7 +1243,7 @@ def _process_stage_batch(
             "image_embedding_model": image_embedding_model,
             "ingested_at": now,
         }
-        image_docs.append({"_id": image_id, "_source": src})
+        image_docs.append({"_id": stage_id, "_source": src})
 
         done_docs.append({
             "_id": stage_id,

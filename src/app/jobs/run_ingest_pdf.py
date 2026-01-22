@@ -1,7 +1,7 @@
 # ==============================================================================
-# 목적 : PDF에서 OCR 후 MD/Artifacts를 실행하는 코드
+# 목적 : PDF에서 OCR 후 데이터를 DB에 적재를 실행하는 코드
 # 최초 작업자 : (AI솔루션/박태원)
-# 최초 작업일 : 2026-01-15
+# 최초 작업일 : 2026-01-21
 # AI 활용 여부 :
 # ==============================================================================
 
@@ -10,7 +10,7 @@ from __future__ import annotations
 import json, logging
 from pathlib import Path
 
-from app.workflows.parse_image_description import parse_image_description
+from app.workflows.ingest_pdf import ingest_pdf
 
 _log = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ def main() -> int:
     config_path = Path("config/config.yaml")
 
     try:
-        result = parse_image_description(config_path=config_path)
+        result = ingest_pdf(config_path=config_path)
     except Exception:
         _log.exception("Workflow failed")
         return 1

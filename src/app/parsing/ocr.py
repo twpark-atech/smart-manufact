@@ -10,63 +10,117 @@ import base64
 import requests
 
 
+def ollama_chat_image(
+    *,
+    base_url: str,
+    model: str,
+    image_bytes: bytes,
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+    timeout_sec: int,
+) -> str:
+    """Ollama /api/chat로 이미지+프롬프트를 보내고 응답 텍스트를 반환합니다.
+
+    image_bytes를 base64로 인코딩해 Ollama Chat API에 포함시킵니다.
+    stream=False로 단발 응답을 받아 message.content를 반환합니다.
+    options.num_predict를 max_tokens로, option.temperature를 temperature로 전달합니다.
+
+    Args:
+        base_url: Ollama 서버 기본 URL.
+        model: Ollama에 로드된 모델명.
+        image_bytes: 입력 이미지 바이트.
+        prompt: 사용자 프롬프트 문자열.
+        max_tokens: 생성 최대 토큰 수.
+        temperature: 샘플링 온도.
+        timeout_sec: HTTP 요청 타임아웃(초).
+
+    Returns:
+        Ollama 응답의 message.content 문자열.
+
+    Raises:
+        requests.exceptions.RequestException: 네트워크/요청 레벨에서 오류가 발생할 경우.
+        requests.HTTPError: 4xx/5xx 응답할 경우.
+        ValueError: 응답 JSON 파싱에 실패할 경우.
+        RuntimeError: 응답에 message.content가 없거나 빈 문자열인 경우.
+    """
+    endpoint = base_url.rstrip("/") + "/api/chat"
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+
+    payload = {
+        "model": model,
+        "stream": False,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+                "images": [b64],
+            }
+        ],
+        "options": {
+            "temperature": float(temperature),
+            "num_predict": int(max_tokens),
+        }
+    }
+
+    r = requests.post(endpoint, json=payload, timeout=timeout_sec)
+    r.raise_for_status()
+    data = r.json()
+
+    msg = (data.get("message") or {})
+    content = msg.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError(f"ollama returned empty content: keys={list(data.keys())}")
+    return content
+
+
 def ocr_page(
-    png_bytes: bytes, 
+    image_bytes: bytes, 
     url: str, 
     model: str, 
     api_key: str, 
     prompt: str, 
     max_tokens: int, 
     temperature: float, 
-    timeout: int = 3600
+    timeout_sec: int = 3600
 ) -> str:
-    r"""페이지 이미지(PNG bytes)를 LVM(OpenAI 호환 API)으로 OCR하여 텍스트를 반환합니다.
+    r"""페이지 이미지(PNG bytes)를 Ollama Chat API로 OCR/설명 처리하고 텍스트를 반환합니다.
+    
+    내부적으로 ollama_chat_image를 호출합니다.
     
     Args:
-        png_bytes: PNG bytes (한 페이지) 
-        url: VLM API endpoint
-        model: 사용할 모델명
-        api_key: Authorization Bearer 토큰
-        prompt: OCR용 프롬프트
-        max_tokens: 응답 최대 토큰
-        temperature: 샘플링 온도
-        timeout: HTTP timeout (초)
+        image_bytes: 입력 이미지 바이트. 
+        url: Ollama 서버 기본 URL.
+        model: 사용할 Ollama 모델명.
+        api_key: Authorization 토큰.
+        prompt: OCR/설명용 프롬프트.
+        max_tokens: 생성 최대 토큰 수.
+        temperature: 샘플링 온도.
+        timeout_sec: HTTP 요청 타임아웃(초).
 
     Returns:
-        OCR 결과 문자열
+        OCR/설명 결과 문자열.
 
     Raises:
-        requests.exceptions.RequestException: 네트워크/HTTP 요청 실패 
-        requests.HTTPError: 4xx/5xx 응답
+        requests.exceptions.RequestException: 네트워크/요청 레벨에서 오류가 발생할 경우. 
+        requests.HTTPError: 4xx/5xx 응답할 경우.
+        ValueError: url 또는 model이 비어있을 경우.
+        RuntimeError: Ollama 응답 content가 비어있을 경우.
 
     Examples:
         >>> text = ocr_page(png_bytes, "http://localhost:11434/v1/chat/completions", "gpt-oss:20b", "", "OCR 엔진으로서 이미지의 모든 텍스트를 추출해줘", 2048, 0.1, 3600)
         sub_title[[435, 111, 559, 135]]
         소재 개론
     """
-    b64 = base64.b64encode(png_bytes).decode("utf-8")
-    data_url = f"data:image/png;base64,{b64}"
-
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ],
-        "max_tokens": max_tokens,
-        "temperature": temperature
-    }
-
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    if not url or not model:
+        raise ValueError("vlm.url and vlm.model are required.")
     
-    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-    resp.raise_for_status()
-    data = resp.json()
-    return (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+    return ollama_chat_image(
+        base_url=url,
+        model=model,
+        image_bytes=image_bytes,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        timeout_sec=timeout_sec,
+    )

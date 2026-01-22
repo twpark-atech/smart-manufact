@@ -8,7 +8,7 @@
 from typing import List, Dict, Any
 
 from app.parsing.md import split_md_by_pages
-from app.parsing.regex import _RE_IMG_TOKEN
+from app.parsing.regex import RE_IMG_TOKEN
 
 
 def build_chunks_from_md(
@@ -21,6 +21,36 @@ def build_chunks_from_md(
     max_chunk_chars: int = 1200,
     min_chunk_chars: int = 80,
 ) -> List[Dict[str, Any]]:
+    """페이지 기반 Markdown 텍스트를 길이 제한에 맞는 청크 리스트로 변환합니다.
+
+    md_text를 split_md_by_pages()로 (page_no, block) 단위로 분리합니다.
+    빈 줄/공백 라인을 제거해 정규화합니다.
+    너무 짧은 페이지는 스킵합니다.
+    문단 단위로 나누고, max_chunk_chars를 넘지 않도록 문단을 누적합니다.
+    누적 버퍼가 꽉 차면 청크를 확정하고 다음 문단부터 새 버퍼를 시작합니다.
+
+    Args:
+        doc_id: 문서 식별자.
+        doc_title: 문서 제목.
+        source_uri: 원본 위치 식별자.
+        doc_sha: 문서 전체 내용 기반 SHA-256.
+        md_text: Docling chunking 친화 포맷의 Markdown 전체 텍스트.
+        max_chunk_chars: 한 청크에 허용할 최대 문자 수.
+        min_chunk_chars: 청크로 인정할 최소 문자 수.
+
+    Returns:
+        청크 dict의 리스트.
+        - doc_id: str
+        - chunk_id: str
+        - doc_title: str
+        - source_uri: str
+        - sha256: str
+        - page_start: int
+        - page_end: int
+        - order: int
+        - text: str
+        - image_ids: list[str]
+    """
     normalized: List[Dict[str, Any]] = []
     order = 0
 
@@ -51,7 +81,7 @@ def build_chunks_from_md(
                         "page_end": page_no,
                         "order": order,
                         "text": buf,
-                        "image_ids": _RE_IMG_TOKEN.findall(buf),
+                        "image_ids": RE_IMG_TOKEN.findall(buf),
                     })
                     order += 1
                 buf = p
@@ -68,7 +98,7 @@ def build_chunks_from_md(
                 "page_end": page_no,
                 "order": order,
                 "text": buf,
-                "image_ids": _RE_IMG_TOKEN.findall(buf),
+                "image_ids": RE_IMG_TOKEN.findall(buf),
             })
             order += 1
 

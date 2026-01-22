@@ -5,9 +5,11 @@
 # AI 활용 여부 :
 # ==============================================================================
 
+from __future__ import annotations
+
 import json, uuid
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Sequence
 
 import psycopg2
 
@@ -16,30 +18,74 @@ from app.common.runtime import now_utc, maybe_uuid
 
 @dataclass(frozen=True)
 class PostgresConfig:
+    """PostgreSQL 접속 설정 클래스.
+    psycopg2.connect에 전달할 DSN과 연결 타임아웃을 보관합니다.
+    
+    Attributes:
+        dsn: PostgreSQL DSN 문자열.
+        connect_timeout_sec: 연결 타임아웃(초).
+    """
     dsn: str
     connect_timeout_sec: int = 10
 
 
 class PostgresWriter:
+    """PostgreSQL에 파이프라인 메타데이터를 저장하는 Writer 클래스.
+
+    - documents: 원본 문서 단위 메타(sha256 unique, MinIO 위치 등).
+    - chunks: 문서 청크 메타(chunk_id PK, doc_sha256 FK 성격, qdrant_point_id 등).
+    - ingest_runs: 파이프라인 실행 단위 상태(running/success/fail).
+    - ingest_events: 실행 중 발생한 이벤트/오류 로그(단계/타깃/상태).
+    - doc_table/doc_table_cell: HTML 테이블 원본과 셀 단위 정규화 저장.
+    """
     def __init__(self, cfg: PostgresConfig):
+        """Writer를 초기화하고 DB 연결을 생성합니다.
+        
+        Args:
+            cfg: PostgresConfig 설정 객체.
+
+        Raises:
+            psycopg2.OperationalError: 연결에 실패한 경우.
+        """
         self._cfg = cfg
         self._conn = self._connect(cfg)
 
     def close(self) -> None:
+        """DB 연결에 종료합니다.
+        
+        close 과정에서 예외가 발생해도 무시합니다.
+        """
         try:
             self._conn.close()
         except Exception:
             pass
+    
+    def cursor(self):
+        """새 커서를 반환합니다.
+        
+        Returns:
+            psycopg2 cursor 객체.
+        """
+        return self._conn.cursor()
+    
+    def commit(self) -> None:
+        """현재 트랜잭션을 커밋합니다."""
+        self._conn.commit()
 
-    def _adapt_uuid(self, v):
-        import uuid as _uuid
-        if v is None:
-            return None
-        if isinstance(v, _uuid.UUID):
-            return str(v)
-        return v
+    def rollback(self) -> None:
+        """현재 트랜잭션을 롤백합니다."""
+        self._conn.rollback()
 
     def ensure_schema(self) -> None:
+        """필요한 테이블/인덱스를 생성합니다.
+        
+        - documents, chunks(+ idx_chunks_doc_sha256)
+        - ingest_runs, ingest_events(+ idx_ingest_events_run)
+        - doc_table, doc_table_cell
+
+        Raises:
+            psycopg2.Error: DDL 실행 실패.
+        """
         stmts = [
             """
             CREATE TABLE IF NOT EXISTS documents (
@@ -104,8 +150,28 @@ class PostgresWriter:
             """
             CREATE INDEX IF NOT EXISTS idx_ingest_events_run ON ingest_events(run_id);
             """,
+            """
+            CREATE TABLE IF NOT EXISTS doc_table(
+                table_id TEXT PRIMARY KEY,
+                created_at TIMESTAMPTZ NOT NULL,
+                raw_html TEXT NOT NULL,
+                header_json JSONB NOT NULL
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS doc_table_cell (
+                table_id TEXT NOT NULL,
+                row_idx INT NOT NULL,
+                col_name TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (table_id, row_idx, col_name)
+            );
+            """,
+            """CREATE INDEX IF NOT EXISTS idx_doc_table_created_at ON doc_table(created_at DESC);""",
+            """CREATE INDEX IF NOT EXISTS idx_doc_table_cell_table_id ON doc_table(table_id);""",
+            """CREATE INDEX IF NOT EXISTS idx_doc_table_cell_col_name ON doc_table_cell(col_name);""",
         ]
-        with self._cursor() as cur:
+        with self.cursor() as cur:
             for s in stmts:
                 cur.execute(s)
         self._conn.commit()
@@ -121,6 +187,28 @@ class PostgresWriter:
         minio_key: Optional[str] = None,
         minio_etag: Optional[str] = None, 
     ) -> uuid.UUID:
+        """문서 메타를 sha256 기준으로 업서트하고 doc_pk를 반환합니다.
+
+        documents.sha256(UNIQUE) 충돌 시 DO UPDATE로 기존 레코드를 갱신합니다.
+        각 필드는 COALESCE(EXCLUDED.x, documents.x)로 처리하여, 새 값이 None이면 기존 값을 보존합니다.
+        updated_at은 항상 갱신됩니다.
+
+        Args:
+            sha256_hex: 문서 콘텐츠 sha256.
+            title: 문서 제목.
+            source_uri: 원본 위치 URI.
+            mime_type: MIME 타입.
+            size_bytes: 파일 크기.
+            minio_bucket: MinIO bucket.
+            minio_key: MinIO object key.
+            minio_etag: MinIO etag.
+
+        Returns:
+            업서트된 documents.doc_pk(UUID).
+
+        Raises:
+            psycopg2.Error: INSERT/UPDATE에 실패한 경우. 
+        """
         now = now_utc()
         doc_pk = uuid.uuid4()
         sql = """
@@ -143,7 +231,7 @@ class PostgresWriter:
             updated_at = EXCLUDED.updated_at
         RETURNING doc_pk;
         """
-        with self._cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 sql,
                 {
@@ -171,6 +259,27 @@ class PostgresWriter:
         embedding_model: Optional[str] = None,
         vector_dim: Optional[int] = None,
     ) -> None:
+        """청크 메타를 chunk_id 기준으로 업서트합니다.
+
+        chunks.chunk_id(PK) 충돌 시 DO UPDATE로 갱신합니다.
+        qdrant_point_id/embedding_model/vector_dim은 새 값이 None이면 기존 값을 보존합니다.
+        created_at/updated_at은 now_utc로 기록하며, 충돌 시 updated_at만 갱신됩니다.
+
+        Args:
+            doc_sha256: 상위 문서 sha256. chunks.doc_sha256에 저장.
+            chunks: 청크 메타 dict 리스트
+            - 필요 키: chunk_id
+            - 선택 키: page_start, page_end, order, qdrant_point_id
+            embedding_model: 청크 임베딩 모델명.
+            vector_dim: 벡터 차원.
+
+        Returns:
+            None
+
+        Raises:
+            KeyError: chunks 원소에 chunk_id가 없을 경우.
+            psycopg2.Error: INSERT/UPDATE에 실패한 겨우.
+        """
         now = now_utc()
         sql = """
         INSERT INTO chunks (
@@ -193,7 +302,7 @@ class PostgresWriter:
             vector_dim = COALESCE(EXCLUDED.vector_dim, chunks.vector_dim),
             updated_at = EXCLUDED.updated_at;
         """
-        with self._cursor() as cur:
+        with self.cursor() as cur:
             for c in chunks:
                 cur.execute(
                     sql,
@@ -213,12 +322,28 @@ class PostgresWriter:
         self._conn.commit()
 
     def start_ingest_run(
-            self,
-            pipeline_version: Optional[str] = None,
-            config_hash: Optional[str] = None,
-            input_count: Optional[int] = None,
-            meta: Optional[Dict[str, Any]] = None,
+        self,
+        pipeline_version: Optional[str] = None,
+        config_hash: Optional[str] = None,
+        input_count: Optional[int] = None,
+        meta: Optional[Dict[str, Any]] = None,
     ) -> uuid.UUID:
+        """ingest_runs에 실행(run) 레코드를 생성하고 run_id를 반환합니다.
+        
+        status는 'running'으로 시작합니다.
+
+        Args:
+            pipeline_version: 파이프라인 버전 문자열.
+            config_hash: 설정 해시.
+            input_count: 입력 문서 수.
+            meta: 추가 메타.
+
+        Returns:
+            생성된 run_id(UUID).
+
+        Raises:
+            psycopg2.Error: INSERT에 실패한 경우.
+        """
         run_id = uuid.uuid4()
         now = now_utc()
         sql = """
@@ -228,7 +353,7 @@ class PostgresWriter:
         VALUES (%(run_id)s, %(pipeline_version)s, %(config_hash)s, %(started_at)s,
                 'running', %(input_count)s, %(meta)s);
         """
-        with self._cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 sql,
                 {
@@ -251,6 +376,24 @@ class PostgresWriter:
         fail_count: Optional[int] = None,
         meta: Optional[Dict[str, Any]] = None,
     ) -> None:
+        """실행(run)을 종료 처리하고 결과를 기록합니다.
+        
+        ended_at을 now_utc로 설정하고 status/success_count/fail_count를 저장합니다.
+        meta는 전달된 값이 None이 아니면 기존 meta를 덮어쓰지 않고 COALESCE로 병합합니다.
+
+        Args:
+            run_id: start_ingest_run에서 생성한 run_id.
+            status: 실행 상태.
+            success_count: 성공 처리 수.
+            fail_count: 실패 처리 수.
+            meta: 추가 메타(JSONB).
+
+        Returns:
+            None
+
+        Raises:
+            psycopg2.Error: UPDATE에 실패한 경우.
+        """
         now = now_utc()
         sql = """
         UPDATE ingest_runs
@@ -261,7 +404,7 @@ class PostgresWriter:
             meta = COALESCE(%(meta)s::jsonb, meta)
         WHERE run_id = %(run_id)s;
         """
-        with self._cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 sql,
                 {
@@ -286,6 +429,26 @@ class PostgresWriter:
         error_message: Optional[str] = None,
         meta: Optional[Dict[str, Any]] = None,
     ) -> uuid.UUID:
+        """ingest_events에 이벤트/오류 로그를 기록합니다.
+        
+        파이프라인의 각 단계(stage)에서 어떤 타깃에 대해 어떤 결과가 발생했는지 추적합니다.
+        
+        Args:
+            run_id: ingest_runs.run_id.
+            stage: 파이프라인 단계명.
+            target: 대상 시스템.
+            status: 상태.
+            doc_sha256: 관련 문서 sha256.
+            chunk_id: 관련 청크 id.
+            error_message: 실패 시 에러 메시지.
+            meta: 추가 메타(JSONB).
+
+        Returns:
+            생성된 event_id(UUID).
+
+        Raises:
+            psycopg2.Error: INSERT에 실패한 경우.
+        """
         event_id = uuid.uuid4()
         now = now_utc()
         sql = """
@@ -298,7 +461,7 @@ class PostgresWriter:
             %(target)s, %(status)s, %(occurred_at)s, %(error_message)s, %(meta)s
         );
         """
-        with self._cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 sql,
                 {
@@ -317,8 +480,80 @@ class PostgresWriter:
         self._conn.commit()
         return event_id
     
+    @staticmethod
+    def upsert_pg_table(
+        cur, 
+        *, 
+        table_id: str, 
+        raw_html: str, 
+        header: Sequence[str], 
+        rows: Sequence[Sequence[str]]
+    ) -> None:
+        """HTML 테이블을 doc_table / doc_table_cell에 업서트합니다.
+        
+        1) doc_table에 (table_id, created_at, raw_html, header_json)을 업서트합니다.
+        2) rows를 순회하며 각 셀은 doc_table_cell(table_id, row_idx, col_name) PK로 업서트합니다.
+
+        Args:
+            cur: psycopg2 cursor.
+            table_id: 테이블 식별자(PK).
+            raw_html: 원본 HTML 문자열.
+            header: 컬럼명 리스트.
+            rows: 행 데이터 2D 리스트.
+        
+        Returns:
+            None
+
+        Raises:
+            psycopg2.Error: INSERT/UPDATE에 실패한 경우.
+        """
+        def _clean(v: Any) -> str:
+            if v is None:
+                return ""
+            if isinstance(v, str):
+                t = v.strip()
+                if len(t) >= 2 and (t[0] == t[-1]) and t[0] in("'", '"'):
+                    t = t[1:-1].strip()
+                return t
+            return str(v)
+        
+        cur.execute(
+            """
+            INSERT INTO doc_table(table_id, created_at, raw_html, header_json)
+            VALUES (%s,%s,%s,%s)
+            ON CONFLICT (table_id) DO UPDATE SET 
+                raw_html=EXCLUDED.raw_html, 
+                header_json=EXCLUDED.header_json
+            """,
+            (table_id, now_utc(), raw_html, json.dumps(header, ensure_ascii=False)),
+        )
+
+        for r_idx, r in enumerate(rows):
+            for c_idx, col_name in enumerate(header):
+                safe_col = _clean(col_name)
+                val = r[c_idx] if (isinstance(r, (list, tuple)) and  c_idx < len(r)) else ""
+                safe_val = _clean(val)
+                
+                cur.execute(
+                    """
+                    INSERT INTO doc_table_cell(table_id, row_idx, col_name, value) 
+                    VALUES (%s,%s,%s,%s)
+                    ON CONFLICT (table_id, row_idx, col_name) DO UPDATE SET 
+                        value=EXCLUDED.value
+                    """,
+                    (table_id, r_idx, col_name, val),
+                )
+
     def _connect(self, cfg: PostgresConfig):
+        """psycopg2로 DB 연결을 생성합니ㅏㄷ.
+        
+        Args:
+            cfg: PostgresConfig.
+
+        Returns:
+            psycopg2 connection 객체.
+
+        Raises:
+            psycopg2.OperationalError: 연결에 실패한 경우.
+        """
         return psycopg2.connect(cfg.dsn, connect_timeout=cfg.connect_timeout_sec)
-    
-    def _cursor(self):
-        return self._conn.cursor()

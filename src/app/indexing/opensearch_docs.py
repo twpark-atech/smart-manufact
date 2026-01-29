@@ -67,7 +67,7 @@ def build_os_docs(
 
 def load_pages_from_staging(
     *,
-    os_pages_stage: OpenSearchWriter,
+    os_pages_staging: OpenSearchWriter,
     doc_id: str,
 ) -> Tuple[List[str], int, int, int, Dict[str, Any]]:
     """페이지 스테이징 인덱스에서 OCR 완료 페이지를 로드하고 처리 현황을 집계합니다.
@@ -78,7 +78,7 @@ def load_pages_from_staging(
     같은 doc_id에 대한 전체 문서를 다시 스캔하여 status를 기준으로 total/done/failed 개수를 집계합니다.
 
     Args:
-        os_pages_stage: pages staging 인덱스에 대해 scan(query=..., size=...)을 제공하는 OpenSearchWriter.
+        os_pages_staging: pages staging 인덱스에 대해 scan(query=..., size=...)을 제공하는 OpenSearchWriter.
         doc_id: 대상 문서 ID.
 
     Returns:
@@ -98,7 +98,7 @@ def load_pages_from_staging(
 
     page_texts: List[str] = []
     meta: Dict[str, Any] = {}
-    for hit in os_pages_stage.scan(query=done_query, size=500):
+    for hit in os_pages_staging.scan(query=done_query, size=500):
         src = hit.get("_source", {}) or {}
         if not meta:
             meta = src
@@ -111,7 +111,7 @@ def load_pages_from_staging(
     total = 0
     done = 0
     failed = 0
-    for hit in os_pages_stage.scan(query=all_query, size=500):
+    for hit in os_pages_staging.scan(query=all_query, size=500):
         total += 1
         st = str((hit.get("_source", {}) or {}).get("status") or "")
         if st == "done":

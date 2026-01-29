@@ -82,7 +82,7 @@ class ParseArtifactsResult:
 
 def _load_pages_from_staging(
     *,
-    os_pages_stage: OpenSearchWriter,
+    os_pages_staging: OpenSearchWriter,
     doc_id: str,
 ) -> Tuple[List[str], int, int, int, Dict[str, Any]]:
     done_query = {
@@ -99,7 +99,7 @@ def _load_pages_from_staging(
 
     page_texts: List[str] = []
     meta: Dict[str, Any] = {}
-    for hit in os_pages_stage.scan(query=done_query, size=500):
+    for hit in os_pages_staging.scan(query=done_query, size=500):
         src = hit.get("_source", {}) or {}
         if not meta:
             meta = src
@@ -112,7 +112,7 @@ def _load_pages_from_staging(
     total = 0
     done = 0
     failed = 0
-    for hit in os_pages_stage.scan(query=all_query, size=500):
+    for hit in os_pages_staging.scan(query=all_query, size=500):
         total += 1
         st = str((hit.get("_source", {}) or {}).get("status") or "")
         if st == "done":
@@ -231,7 +231,7 @@ def parse_image_description(
         url=os_url, index=image_index,
         username=os_username, password=os_password, verify_certs=os_verify,
     ))
-    os_pages_stage = OpenSearchWriter(OpenSearchConfig(
+    os_pages_staging = OpenSearchWriter(OpenSearchConfig(
         url=os_url, index=pages_staging_index,
         username=os_username, password=os_password, verify_certs=os_verify,
     ))
@@ -242,7 +242,7 @@ def parse_image_description(
 
     os_text.ensure_index(body=build_pdf_chunks_v1_body())
     os_image.ensure_index(body=build_pdf_images_v1_body())
-    os_pages_stage.ensure_index(body=build_pdf_pages_staging_v1_body())
+    os_pages_staging.ensure_index(body=build_pdf_pages_staging_v1_body())
     os_images_stage.ensure_index(body=build_pdf_images_staging_v1_body())
 
     emb_cfg = OllamaEmbeddingConfig(
@@ -321,7 +321,7 @@ def parse_image_description(
                     prompt, max_tokens, temperature, timeout_sec
                 )
 
-                os_pages_stage.bulk_upsert([{
+                os_pages_staging.bulk_upsert([{
                     "_id": page_id,
                     "_source": {
                         "doc_id": doc_id,
@@ -343,7 +343,7 @@ def parse_image_description(
                 staged_page_count += 1
 
             except Exception as e:
-                os_pages_stage.bulk_upsert([{
+                os_pages_staging.bulk_upsert([{
                     "_id": page_id,
                     "_source": {
                         "doc_id": doc_id,
@@ -457,7 +457,7 @@ def parse_image_description(
     else:
         _log.info("Start from_pages_staging. doc_id=%s", doc_id)
         page_texts, total_pages, done_cnt, failed_cnt, meta = _load_pages_from_staging(
-            os_pages_stage=os_pages_stage,
+            os_pages_staging=os_pages_staging,
             doc_id=doc_id,
         )
 

@@ -30,7 +30,7 @@ def setup_logging():
 def main() -> int:
     setup_logging()
 
-    config_path = Path("config/config.yaml")
+    config_path = Path("config/config.yml")
 
     try:
         result = parse_image_description(config_path=config_path)

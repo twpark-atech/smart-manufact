@@ -9,9 +9,23 @@ import re
 from typing import List, Tuple, Optional, Dict, Any
 
 from bs4 import BeautifulSoup
+from html import unescape
 
 from app.common.hash import sha256_bytes
 from app.parsing.regex import RE_HTML_TABLE
+
+def normalize_table_html(raw_html: str) -> str:
+    if not raw_html:
+        return raw_html
+    s = raw_html.strip()
+
+    s = s.replace('\\"', '"').replace("\\'", "'")
+
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        s = s[1:-1]
+
+    s = unescape(s)
+    return s
 
 
 def extract_html_tables(md: str) -> List[str]:

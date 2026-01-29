@@ -71,6 +71,10 @@ class OpenSearchWriter:
             verify_certs=cfg.verify_certs,
         )
 
+    @property
+    def index(self) -> str:
+        return str(self._cfg.index)
+
 
     def ensure_index(self, *, body: Dict[str, Any]) -> None:
         """인덱스가 존재하도록 보장합니다.

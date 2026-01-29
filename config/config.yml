@@ -6,8 +6,8 @@
 # ==============================================================================
 
 paths:
-  data_folder: "/mnt/d/스마트제조혁신기술개발/data"
-  input_pdf: "1.섬유소재와 전처리 공정 기술의 이해.pdf"
+  data_folder: "/mnt/d/스마트제조혁신기술개발/postprocess-data"
+  input_pdf: "기능성 가공 기술 실무 테스트.pdf"
   output_dir: "scratch"
 
 render:
@@ -41,12 +41,12 @@ prompt_img_desc: |
   
 opensearch:
   url: "http://localhost:9200"
-  text_index: "pdf_chunks_v1"
-  image_index: "pdf_images_v1"
-  table_index: "pdf_tables_v1"
-  images_staging_index: "pdf_images_staging_v1"
-  pages_staging_index: "pdf_pages_staging_v1"
-  tables_staging_index: "pdf_tables_staging_v1"
+  text_index: "chunks"
+  image_index: "images"
+  table_index: "tables"
+  images_staging_index: "images_staging"
+  pages_staging_index: "pages_staging"
+  tables_staging_index: "tables_staging"
   bulk_size: 500
   # username: "admin"
   # password: "Atech1221!@"
@@ -69,7 +69,7 @@ embed_image:
   timeout_sec: 60
   batch_size: 16
   throtthle_sec: 0.02
-  ollama_base_url: "http://211.184.184.238:8008/embed"
+  base_url: "http://127.0.0.1:8008/embed"
 
 qdrant:
   url: "http://localhost:6333"
@@ -84,6 +84,7 @@ neo4j:
   database: "neo4j"
 
 postgres:
+  enabled: true
   dsn: "postgresql://postgres:postgres@localhost:5432/postgres"
   connect_timeout_sec: 10
 
@@ -115,7 +116,3 @@ image_filter:
   enabled: true
   stddev_min: 2.0
   mode: "grayscale"
-
-workflow:
-  # mode: fresh or from_pages_staging
-  mode: from_pages_staging

@@ -52,6 +52,20 @@ from app.indexing.opensearch_docs import load_pages_from_staging
 _log = logging.getLogger(__name__)
 
 
+def _as_bool(v: Any, default: bool = False) -> bool:
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    s = str(v).strip().lower()
+    if s in ("true", "1", "yes", "y", "on"):
+        return True
+    if s in ("false", "0", "no", "n", "off", ""):
+        return False
+    return default
+
 @dataclass(frozen=True)
 class ParseArtifactsResult:
     """PDF 파싱/임베딩/인덱싱 파이프라인의 최종 산출물 DTO 클래스.
@@ -527,7 +541,7 @@ def ingest_pdf(
         access_key=str(get_value(cfg, "minio.access_key", "")),
         secret_key=str(get_value(cfg, "minio.secret_key", "")),
         bucket=str(get_value(cfg, "minio.bucket", "")),
-        secure=bool(get_value(cfg, "minio.secure", "")),
+        secure=_as_bool(get_value(cfg, "minio.secure", False), default=False),
     )
     if not minio_cfg.endpoint or not minio_cfg.bucket:
         raise ValueError("minio.endpoint/minio.bucket is required.")
@@ -540,7 +554,7 @@ def ingest_pdf(
 
     os_username = get_value(cfg, "opensearch.username", None)
     os_password = get_value(cfg, "opensearch.password", None)
-    os_verify = bool(get_value(cfg, "opensearch.verify_certs", None))
+    os_verify = _as_bool(get_value(cfg, "opensearch.verify_certs", False), default=False)
 
     text_index = str(get_value(cfg, "opensearch.text_index", "pdf_chunks_v1"))
     image_index = str(get_value(cfg, "opensearch.image_index", "pdf_images_v1"))
@@ -562,7 +576,7 @@ def ingest_pdf(
         url=os_url, index=table_index,
         username=os_username, password=os_password, verify_certs=os_verify,
     ))
-    os_pages_stage = OpenSearchWriter(OpenSearchConfig(
+    os_pages_staging = OpenSearchWriter(OpenSearchConfig(
         url=os_url, index=pages_staging_index,
         username=os_username, password=os_password, verify_certs=os_verify,
     ))
@@ -578,7 +592,7 @@ def ingest_pdf(
     os_text.ensure_index(body=build_pdf_chunks_v1_body())
     os_image.ensure_index(body=build_pdf_images_v1_body())
     os_table.ensure_index(body=build_pdf_tables_v1_body())
-    os_pages_stage.ensure_index(body=build_pdf_pages_staging_v1_body())
+    os_pages_staging.ensure_index(body=build_pdf_pages_staging_v1_body())
     os_images_stage.ensure_index(body=build_pdf_images_staging_v1_body())
     os_tables_stage.ensure_index(body=build_pdf_tables_staging_v1_body())
 
@@ -691,7 +705,7 @@ def ingest_pdf(
                         prompt, max_tokens, temperature, timeout_sec
                     )
 
-                    os_pages_stage.bulk_upsert([{
+                    os_pages_staging.bulk_upsert([{
                         "_id": page_id,
                         "_source": {
                             "doc_id": doc_id,
@@ -713,7 +727,7 @@ def ingest_pdf(
                     staged_page_count += 1
 
                 except Exception as e:
-                    os_pages_stage.bulk_upsert([{
+                    os_pages_staging.bulk_upsert([{
                         "_id": page_id,
                         "_source": {
                             "doc_id": doc_id,
@@ -784,6 +798,30 @@ def ingest_pdf(
                 generated_desc_count += len(desc_records)
                 page_texts.append(new_txt)
 
+                try:
+                    if new_txt and new_txt != txt:
+                        os_pages_staging.bulk_upsert([{
+                            "_id": page_id,
+                            "_source": {
+                                "doc_id": doc_id,
+                                "page_id": page_id,
+                                "doc_title": doc_title,
+                                "source_uri": source_uri,
+                                "pdf_uri": pdf_uri,
+                                "page_no": int(page_no),
+                                "ocr_text": new_txt,
+                                "ocr_model": str(vlm_model or ""),
+                                "prompt": str(prompt or ""),
+                                "status": "done",
+                                "attempts": 1,
+                                "last_error": "",
+                                "created_at": now,
+                                "updated_at": now_utc(),
+                            }
+                        }], batch_size=bulk_size)
+                except Exception as e:
+                    _log.warning("pages_staging rewrite upsert failed. page_no=%s err=%s", page_no, e)
+
                 desc_by_image_id: Dict[str, Dict[str, Any]] = {
                     d.get("image_id"): d for d in (desc_records or []) if isinstance(d, dict) and d.get("image_id")
                 }
@@ -795,14 +833,12 @@ def ingest_pdf(
                     if not image_id or not img_path.exists():
                         continue
 
-                    stage_id = f"{doc_id}:p{int(page_no):04d}:i{int(order):04d}"
+                    stage_id = image_id
 
-                    # ---- MinIO upload (per-image) with exception logging
                     try:
                         crop_bytes = img_path.read_bytes()
                         image_sha = sha256_bytes(crop_bytes)
 
-                        # 충돌 방지: crop key도 stage_id 기반 권장
                         image_key = minio.build_crop_image_key(doc_id, stage_id, ext="png")
                         img_put = minio.upload_bytes_to_key(
                             crop_bytes,
@@ -817,7 +853,6 @@ def ingest_pdf(
                         )
                         continue
 
-                    # ---- desc_text: 없으면 placeholder로라도 staging에 넣기
                     desc_text = ""
                     drec = desc_by_image_id.get(image_id)
                     if drec and isinstance(drec.get("description"), str):
@@ -870,8 +905,10 @@ def ingest_pdf(
 
         else:
             _log.info("Start from_pages_staging. doc_id=%s", doc_id)
+            _log.info("NOTE: from_pages_staging mode does NOT rebuild images_staging in this pipeline.")
+
             pages, total_pages, done_cnt, failed_cnt, meta = load_pages_from_staging(
-                os_pages_stage=os_pages_stage,
+                os_pages_staging=os_pages_staging,
                 doc_id=doc_id,
             )
 
@@ -961,7 +998,7 @@ def ingest_pdf(
                 emb_provider,
                 texts,
                 max_batch_size=text_max_batch,
-                expected_dim=4096,
+                expected_dim=text_expected_dim,
             )
 
             chunk_docs: List[Dict[str, Any]] = []
@@ -1038,7 +1075,7 @@ def ingest_pdf(
                 bulk_size=bulk_size,
                 emb_provider=emb_provider,
                 text_max_batch=text_max_batch,
-                text_expected_dim=4096,
+                text_expected_dim=text_expected_dim,
                 text_embedding_model=text_embedding_model,
                 image_embed_cfg=image_embed_cfg,
                 image_embedding_model=image_embedding_model,
@@ -1054,7 +1091,7 @@ def ingest_pdf(
                 bulk_size=bulk_size,
                 emb_provider=emb_provider,
                 text_max_batch=text_max_batch,
-                text_expected_dim=4096,
+                text_expected_dim=text_expected_dim,
                 text_embedding_model=text_embedding_model,
                 image_embed_cfg=image_embed_cfg,
                 image_embedding_model=image_embedding_model,
@@ -1191,10 +1228,35 @@ def _process_stage_batch(
                 })
             os_images_stage.bulk_upsert(fail_docs, batch_size=bulk_size)
             return 0
+        
+    if len(desc_vecs) != len(buf):
+        now = now_utc()
+        fail_docs = []
+        for b in buf:
+            stage_id = b.get("stage_id") or b.get("image_id")
+            fail_docs.append({
+                "_id": stage_id,
+                "_source": {
+                    **b,
+                    "status": "failed",
+                    "attempts": int(b.get("attempts", 0)) + 1,
+                    "last_error": f"desc_embed_len_mismatch: got={len(desc_vecs)} expected={len(buf)}",
+                    "updated_at": now,
+                },
+            })
+        os_images_stage.bulk_upsert(fail_docs, batch_size=bulk_size)
+        return 0
 
     try:
         image_bytes_list: List[bytes] = _fetch_images_from_minio(buf=buf, minio_reader=minio_reader)
+        if len(image_bytes_list) != len(buf):
+            raise RuntimeError(f"image_fetch_len_mismatch: got={len(image_bytes_list)} expected={len(buf)}")
+        
         img_vecs = embed_images_bytes_batch(image_bytes_list, cfg=image_embed_cfg)
+        
+        if len(img_vecs) != len(buf):
+            raise RuntimeError(f"image_embed_len_mismatch: got={len(img_vecs)} expected={len(buf)}")
+                               
     except Exception as e:
         now = now_utc()
         fail_docs = []

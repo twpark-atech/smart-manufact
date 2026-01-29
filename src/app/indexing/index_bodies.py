@@ -8,7 +8,7 @@
 from __future__ import annotations
 from typing import Dict, Any
 
-from app.parsing.regex import _HNSW_4096, _HNSW_1024
+from app.parsing.regex import HNSW_4096, HNSW_1024
 
 
 def build_pdf_chunks_v1_body() -> Dict[str, Any]:
@@ -32,14 +32,9 @@ def build_pdf_chunks_v1_body() -> Dict[str, Any]:
             "properties": {
             "doc_id":           { "type": "keyword" },
             "chunk_id":         { "type": "keyword" },
-            "doc_title":        { "type": "text" },
-            "source_uri":       { "type": "keyword" },
-            "page_start":       { "type": "integer" },
-            "page_end":         { "type": "integer" },
-            "order":            { "type": "integer" },
             "text":             { "type": "text" },
             "image_ids":        { "type": "keyword" },
-            "embedding":        _HNSW_4096,
+            "embedding":        HNSW_4096,
             "embedding_model":  { "type": "keyword" },
             "ingested_at":      { "type": "date" }
             }
@@ -103,27 +98,9 @@ def build_pdf_images_v1_body() -> Dict[str, Any]:
             "properties": {
             "doc_id":       { "type": "keyword" },
             "image_id":     { "type": "keyword" },
-            "doc_title":    { "type": "text" },
-            "source_uri":   { "type": "keyword" },
-            "page_no":      { "type": "integer" },
-            "order":        { "type": "integer" },
-            "pdf_uri":      { "type": "keyword" },
-            "image_uri":    { "type": "keyword" },
-            "image_mime":   { "type": "keyword" },
-            "image_sha256": { "type": "keyword" },
-            "width":        { "type": "integer" },
-            "height":       { "type": "integer" },
-            "bbox": {
-                "properties": {
-                "x1": { "type": "integer" },
-                "y1": { "type": "integer" },
-                "x2": { "type": "integer" },
-                "y2": { "type": "integer" }
-                }
-            },
             "desc_text":             { "type": "text" },
-            "desc_embedding":        _HNSW_4096,
-            "image_embedding":       _HNSW_1024,
+            "desc_embedding":        HNSW_4096,
+            "image_embedding":       HNSW_1024,
             "desc_embedding_model":  { "type": "keyword" },
             "image_embedding_model": { "type": "keyword" },
             "ingested_at":           { "type": "date" }
@@ -197,24 +174,10 @@ def build_pdf_tables_v1_body() -> Dict[str, Any]:
         "mappings": {
             "dynamic": False,
             "properties": {
-            "doc_type":     { "type": "keyword" },
             "doc_id":       { "type": "keyword" },
-            "doc_title":    { "type": "text" },
-            "source_uri":   { "type": "keyword" },
-            "pdf_uri":      { "type": "keyword" },
-            "page_no":      { "type": "integer" },
-            "order":        { "type": "integer" },
             "table_id":     { "type": "keyword" },
-            "table_sha256": { "type": "keyword" },
-            "header":       { "type": "keyword" },
-            "row_count":    { "type": "integer" },
-            "col_count":    { "type": "integer" },
-            "raw_html":     { "type": "text" },
             "table_text":   { "type": "text" },
-            "row_idx":      { "type": "integer" },
-            "row_obj":      { "type": "text" },
-            "row_text":     { "type": "text" },
-            "row_embedding": _HNSW_4096,
+            "row_embedding": HNSW_4096,
             "row_embedding_model":  { "type": "keyword" },
             "ingested_at":          { "type": "date" }
             }

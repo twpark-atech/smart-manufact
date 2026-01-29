@@ -30,7 +30,7 @@ def setup_logging():
 def main() -> int:
     setup_logging()
 
-    config_path = Path("config/config.yaml")
+    config_path = Path("config/config.yml")
 
     try:
         result = ingest_pdf(config_path=config_path)

@@ -237,6 +237,32 @@ class PostgresWriter:
             )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_doc_table_cells_table ON doc_table_cells(table_id);")
 
+            # images
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS doc_images (
+                    image_id TEXT PRIMARY KEY,
+                    doc_id CHAR(64) NOT NULL REFERENCES documents(sha256) ON DELETE CASCADE,
+                    page_no INT NOT NULL,
+                    ord INT NOT NULL,
+                    image_uri TEXT,
+                    image_sha256 CHAR(64),
+                    width INT,
+                    height INT,
+                    bbox JSONB,
+                    crop_bbox JSONB,
+                    det_bbox JSONB,
+                    caption_bbox JSONB,
+                    caption TEXT,
+                    description TEXT,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
+                );
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_doc_images_doc ON doc_images(doc_id);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_doc_images_doc_page ON doc_images(doc_id, page_no);")
+
         self._conn.commit()
 
     @staticmethod
@@ -676,6 +702,66 @@ class PostgresWriter:
             page_no = EXCLUDED.page_no,
             char_start = EXCLUDED.char_start,
             char_end = EXCLUDED.char_end,
+            updated_at = EXCLUDED.updated_at;
+        """
+
+        with self.cursor() as cur:
+            execute_values(cur, sql, rows, page_size=1000)
+        self._conn.commit()
+
+    def upsert_doc_images(self, *, doc_id: str, images: List[Dict[str, Any]]) -> None:
+        """doc_images에 이미지 메타데이터를 upsert합니다.
+
+        Args:
+            doc_id: 문서 ID(sha256).
+            images: 이미지 메타 리스트.
+        """
+        if not images:
+            return
+        now = now_utc()
+        rows = []
+        for it in images:
+            rows.append(
+                (
+                    str(it.get("image_id") or ""),
+                    doc_id,
+                    int(it.get("page_no") or 0),
+                    int(it.get("order") or 0),
+                    str(it.get("image_uri") or ""),
+                    str(it.get("image_sha256") or ""),
+                    int(it.get("width") or 0),
+                    int(it.get("height") or 0),
+                    Json(it.get("bbox")) if it.get("bbox") is not None else None,
+                    Json(it.get("crop_bbox")) if it.get("crop_bbox") is not None else None,
+                    Json(it.get("det_bbox")) if it.get("det_bbox") is not None else None,
+                    Json(it.get("caption_bbox")) if it.get("caption_bbox") is not None else None,
+                    str(it.get("caption") or ""),
+                    str(it.get("description") or ""),
+                    now,
+                    now,
+                )
+            )
+
+        sql = """
+        INSERT INTO doc_images (
+            image_id, doc_id, page_no, ord, image_uri, image_sha256, width, height,
+            bbox, crop_bbox, det_bbox, caption_bbox, caption, description, created_at, updated_at
+        )
+        VALUES %s
+        ON CONFLICT (image_id) DO UPDATE SET
+            doc_id = EXCLUDED.doc_id,
+            page_no = EXCLUDED.page_no,
+            ord = EXCLUDED.ord,
+            image_uri = EXCLUDED.image_uri,
+            image_sha256 = EXCLUDED.image_sha256,
+            width = EXCLUDED.width,
+            height = EXCLUDED.height,
+            bbox = EXCLUDED.bbox,
+            crop_bbox = EXCLUDED.crop_bbox,
+            det_bbox = EXCLUDED.det_bbox,
+            caption_bbox = EXCLUDED.caption_bbox,
+            caption = EXCLUDED.caption,
+            description = EXCLUDED.description,
             updated_at = EXCLUDED.updated_at;
         """
 

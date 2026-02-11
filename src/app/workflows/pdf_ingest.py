@@ -820,6 +820,7 @@ def ingest_pdf(
                 }
 
                 stage_docs: List[Dict[str, Any]] = []
+                pg_image_rows: List[Dict[str, Any]] = []
                 for order, r in enumerate(img_records or [], start=1):
                     image_id = str(r.get("image_id") or "")
                     img_path = Path(str(r.get("image_path") or ""))
@@ -879,10 +880,29 @@ def ingest_pdf(
                         "updated_at": now2,
                     }
                     stage_docs.append({"_id": stage_id, "_source": stage_src})
+                    pg_image_rows.append(
+                        {
+                            "image_id": image_id,
+                            "page_no": page_no_i,
+                            "order": int(order),
+                            "image_uri": image_uri,
+                            "image_sha256": image_sha,
+                            "width": int(width),
+                            "height": int(height),
+                            "bbox": r.get("bbox") or {},
+                            "crop_bbox": r.get("crop_bbox") or {},
+                            "det_bbox": r.get("det_bbox") or {},
+                            "caption_bbox": caption_bbox,
+                            "caption": str(r.get("caption") or ""),
+                            "description": desc_text,
+                        }
+                    )
 
                 if stage_docs:
                     ctx.os_images_stage.bulk_upsert(stage_docs, batch_size=ctx.bulk_size)
                     staged_image_count += len(stage_docs)
+                if pg_image_rows and ctx.pg is not None:
+                    ctx.pg.upsert_doc_images(doc_id=pg_doc_id, images=pg_image_rows)
 
             if ctx.pg is not None:
                 summary = ctx.pg.get_process_summary(doc_id=pg_doc_id)
